@@ -169,12 +169,12 @@ class ScorerWrapper:
         return all_outputs
     def __call__(self, inputs, generateds, **kwargs):
         return self.score(inputs, generateds, **kwargs)
-def sum_score(scorers, paragraphs, generateds, partial=False, printing=False, extras={}):
+def sum_score(scorers, paragraphs, generateds, responses, partial=False, printing=False, extras={}):
     total_scores = np.zeros((len(paragraphs)))
     scorer_returns, timings = {}, {}
     T = time.time()
     for scorer in scorers:
-        scores = scorer['model'].score(paragraphs, generateds, partial=partial, printing=printing, **extras)
+        scores = scorer['model'].score(paragraphs, generateds, responses=responses, partial=partial, printing=printing, **extras)
         weight = scorer.get("weight", 1.0)
         total_scores += scorer["sign"]*weight*np.array(scores['scores'])
         scorer_returns.update({scorer['name']+"_"+k: v for k, v in scores.items()})
