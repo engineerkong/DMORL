@@ -21,7 +21,9 @@ from utils_additional import *
 
 def config_scorer(meta_model, tokenizer, ref_model, device):
     # Setup optimizer and scaler
-    optimizer = torch.optim.AdamW(meta_model.parameters(), lr=1e-4)
+    meta_model.requires_grad = True
+    meta_model.train()
+    optimizer = torch.optim.SGD(meta_model.parameters(), lr=1e-4)
     scaler = torch.amp.GradScaler(device=device)
 
     def get_scorer(obj):
@@ -45,7 +47,7 @@ def config_scorer(meta_model, tokenizer, ref_model, device):
     objectives = ["reflection", "empathy", "fluency"]
     scorers = [get_scorer(obj) for obj in objectives]
     rl_crit = ReinforceCriterion(model=meta_model, tokenizer=tokenizer, optimizer=optimizer, scaler=scaler, ref_model=ref_model, kl_coeff=0.05)
-    scorer = ScorerWrapper(scorers, learning_mode="weighted", scoring_method="fixed_logsum", max_batch_size=8)
+    scorer = ScorerWrapper(scorers, learning_mode="single", scoring_method="fixed_logsum", max_batch_size=16)
 
     return optimizer, scaler, scorer, rl_crit
 
@@ -87,31 +89,29 @@ def meta_train(meta_model, tokenizer, train_dataloader, val_dataloader, optimize
                 return_tensors="pt", padding="max_length", truncation=True)["input_ids"]
             prompts = [p for p in prompts for _ in range(num_runs)]
             responses = [r for r in responses for _ in range(num_runs)]
+            initial_params = {name: copy.deepcopy(param.data) for name, param in meta_model.named_parameters()}
 
             # Calculate scorers - kSCST/logsum
+            optimizer.zero_grad()
             scorer_returns = scorer.score(prompts, generateds, responses=responses, step_count=step_count, \
                                           bandit=None, chosen=None, extras={"reflection": 1/3, "empathy": 1/3, "fluency": 1/3})
-            print(f"Reflection: {np.mean(scorer_returns['reflection_scores'])}, \
-                    Empathy: {np.mean(scorer_returns['empathy_scores'])}, \
-                    Fluency: {np.mean(scorer_returns['fluency_scores'])}")
+            # print(f"Reflection: {np.mean(scorer_returns['reflection_scores'])}, \
+            #         Empathy: {np.mean(scorer_returns['empathy_scores'])}, \
+            #         Fluency: {np.mean(scorer_returns['fluency_scores'])}")
             total_scores = torch.FloatTensor(scorer_returns["total_scores"]).cuda()
+            # print(f"Total scores: {total_scores}")
             batch_scores = total_scores.reshape(train_batch_size, num_runs)
             mean_scores = batch_scores.mean(dim=1)
             unlooped_mean_scores = torch.repeat_interleave(mean_scores, num_runs)
-            normalized_rewards = (unlooped_mean_scores - total_scores)
-
+            normalized_rewards = total_scores # (unlooped_mean_scores - total_scores) # TODO all 0
             # Calculate loss with KL penalty
             loss = rl_crit(prompts, gens_out, normalized_rewards)
-
-            initial_params = {name: copy.deepcopy(param.data) for name, param in meta_model.named_parameters()}
-
             # Backward pass and optimization
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(meta_model.parameters(), max_norm=2.0, norm_type=2)
             scaler.step(optimizer)
             scaler.update()
-            optimizer.zero_grad()
 
             for name, param in meta_model.named_parameters():
                 if torch.equal(initial_params[name], param.data):
